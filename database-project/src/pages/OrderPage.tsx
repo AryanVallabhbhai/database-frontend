@@ -1,5 +1,14 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
-import { createOrder, listMenuItems, listServers, type MenuItemOption, type ServerOption } from '../lib/restaurantRepository'
+import {
+  createOrder,
+  customerHasRewardsProfile,
+  findCustomerById,
+  findCustomersByName,
+  listMenuItems,
+  listServers,
+  type MenuItemOption,
+  type ServerOption,
+} from '../lib/restaurantRepository'
 import type { OrderMethod, PaymentMethod } from '../lib/restaurantTypes'
 import {
   formatErrorList,
@@ -33,6 +42,14 @@ type OrderFormState = {
   staff: StaffRow[]
 }
 
+type ResolvedOrderCustomer = {
+  customerId: number
+  customerName: string
+  hasRewardsProfile: boolean
+}
+
+type RewardsLookupStatus = 'idle' | 'found' | 'missing' | 'error'
+
 const orderMethods: OrderMethod[] = ['dine-in', 'online', 'delivery']
 const paymentMethods: PaymentMethod[] = ['card', 'cash', 'giftcard']
 
@@ -52,22 +69,101 @@ function createInitialOrderForm(): OrderFormState {
     method: 'dine-in',
     payment: 'card',
     total: '',
-    hasRewardsProfile: true,
+    hasRewardsProfile: false,
     items: [{ itemId: '', quantity: '1' }],
     staff: [{ employeeId: '', notes: '' }],
+  }
+}
+
+function calculateItemsTotal(items: OrderItemRow[], menuItems: MenuItemOption[]) {
+  return items.reduce((sum, item) => {
+    const quantity = Number(item.quantity)
+    if (!Number.isFinite(quantity) || quantity <= 0) return sum
+
+    const menuItem = menuItems.find((option) => String(option.itemId) === item.itemId)
+    if (typeof menuItem?.price !== 'number') return sum
+
+    return sum + menuItem.price * quantity
+  }, 0)
+}
+
+function updateItemsAndTotal(
+  current: OrderFormState,
+  items: OrderItemRow[],
+  menuItems: MenuItemOption[],
+): OrderFormState {
+  const calculatedTotal = calculateItemsTotal(items, menuItems)
+
+  return {
+    ...current,
+    items,
+    ...(calculatedTotal > 0 ? { total: calculatedTotal.toFixed(2) } : {}),
+  }
+}
+
+function calculatePointsEarned(totalValue: string, hasRewardsProfile: boolean) {
+  const total = Number(totalValue)
+
+  if (!hasRewardsProfile || !Number.isFinite(total) || total <= 0) {
+    return 0
+  }
+
+  return Math.floor(total)
+}
+
+async function resolveOrderCustomer(form: OrderFormState): Promise<ResolvedOrderCustomer> {
+  const customerIdText = form.customerId.trim()
+  const customerName = form.customerName.trim()
+
+  if (customerIdText) {
+    const customerId = Number(customerIdText)
+    const existingCustomer = await findCustomerById(customerId)
+
+    if (!customerName && !existingCustomer) {
+      throw new Error('Customer name is required when the Customer ID is not already in the database.')
+    }
+
+    const hasRewardsProfile = await customerHasRewardsProfile(customerId)
+
+    return {
+      customerId,
+      customerName: customerName || existingCustomer?.name || '',
+      hasRewardsProfile,
+    }
+  }
+
+  const matches = await findCustomersByName(customerName)
+
+  if (matches.length === 0) {
+    throw new Error('No customer with that name was found. Enter a Customer ID to identify the customer.')
+  }
+
+  if (matches.length > 1) {
+    throw new Error('Multiple customers have that name. Enter the Customer ID to choose the right customer.')
+  }
+
+  const customer = matches[0]
+  const hasRewardsProfile = await customerHasRewardsProfile(customer.customerId)
+
+  return {
+    customerId: customer.customerId,
+    customerName: customer.name,
+    hasRewardsProfile,
   }
 }
 
 function validateOrderForm(form: OrderFormState) {
   const errors: string[] = []
   const orderHour = getHourFromDatetimeLocal(form.orderedAt)
+  const hasCustomerId = Boolean(form.customerId.trim())
+  const hasCustomerName = Boolean(form.customerName.trim())
 
-  if (!isExactDigits(form.customerId, 9)) {
-    errors.push('Customer ID must be exactly 9 digits.')
+  if (!hasCustomerId && !hasCustomerName) {
+    errors.push('Enter either Customer ID or customer name.')
   }
 
-  if (!form.customerName.trim()) {
-    errors.push('Customer name is required.')
+  if (hasCustomerId && !isWholeNumberAtLeast(form.customerId, 1)) {
+    errors.push('Customer ID must be a positive whole number.')
   }
 
   if (!isExactDigits(form.orderId, 9)) {
@@ -117,6 +213,8 @@ export default function OrderPage() {
   const [loadingMenuItems, setLoadingMenuItems] = useState(true)
   const [servers, setServers] = useState<ServerOption[]>([])
   const [loadingServers, setLoadingServers] = useState(true)
+  const [checkingRewardsProfile, setCheckingRewardsProfile] = useState(false)
+  const [rewardsLookupStatus, setRewardsLookupStatus] = useState<RewardsLookupStatus>('idle')
 
   useEffect(() => {
     async function loadMenuItems() {
@@ -151,45 +249,125 @@ export default function OrderPage() {
     loadServers()
   }, [])
 
+  useEffect(() => {
+    let didCancel = false
+
+    async function checkRewardsProfile() {
+      const customerIdText = form.customerId.trim()
+
+      if (!customerIdText || !isWholeNumberAtLeast(customerIdText, 1)) {
+        setCheckingRewardsProfile(false)
+        setRewardsLookupStatus('idle')
+        setForm((current) =>
+          current.hasRewardsProfile ? { ...current, hasRewardsProfile: false } : current,
+        )
+        return
+      }
+
+      setCheckingRewardsProfile(true)
+      setRewardsLookupStatus('idle')
+
+      try {
+        const hasRewardsProfile = await customerHasRewardsProfile(Number(customerIdText))
+
+        if (didCancel) {
+          return
+        }
+
+        setForm((current) =>
+          current.hasRewardsProfile === hasRewardsProfile
+            ? current
+            : { ...current, hasRewardsProfile },
+        )
+        setRewardsLookupStatus(hasRewardsProfile ? 'found' : 'missing')
+      } catch {
+        if (didCancel) {
+          return
+        }
+
+        setForm((current) =>
+          current.hasRewardsProfile ? { ...current, hasRewardsProfile: false } : current,
+        )
+        setRewardsLookupStatus('error')
+      } finally {
+        if (!didCancel) {
+          setCheckingRewardsProfile(false)
+        }
+      }
+    }
+
+    checkRewardsProfile()
+
+    return () => {
+      didCancel = true
+    }
+  }, [form.customerId])
+
   const calculatedItemsTotal = useMemo(() => {
-    return form.items.reduce((sum, item) => {
-      const qty = Number(item.quantity)
-      if (!Number.isFinite(qty) || qty <= 0) return sum
-
-      const menuItem = menuItems.find((m) => String(m.itemId) === item.itemId)
-      if (!menuItem || typeof (menuItem as any).price !== 'number') return sum
-
-      return sum + (menuItem as any).price * qty
-    }, 0)
+    return calculateItemsTotal(form.items, menuItems)
   }, [form.items, menuItems])
 
-  // Auto-update total when items change
-  useEffect(() => {
-    if (calculatedItemsTotal > 0) {
-      setForm((current) => ({
-        ...current,
-        total: calculatedItemsTotal.toFixed(2),
-      }))
-    }
-  }, [calculatedItemsTotal])
+  const hasValidCustomerId = isWholeNumberAtLeast(form.customerId, 1)
+  const hasRewardsProfileForCustomer = hasValidCustomerId && form.hasRewardsProfile
 
   const pointsEarned = useMemo(() => {
-    const total = Number(form.total)
+    return calculatePointsEarned(form.total, hasRewardsProfileForCustomer)
+  }, [form.total, hasRewardsProfileForCustomer])
 
-    if (!form.hasRewardsProfile || !Number.isFinite(total) || total <= 0) {
-      return 0
+  const rewardsLookupLabel = useMemo(() => {
+    if (!form.customerId.trim()) {
+      return 'Enter Customer ID to check rewards'
     }
 
-    return Math.floor(total)
-  }, [form.hasRewardsProfile, form.total])
+    if (!hasValidCustomerId) {
+      return 'Enter a valid Customer ID to check rewards'
+    }
+
+    if (checkingRewardsProfile) {
+      return 'Checking rewards profile'
+    }
+
+    if (rewardsLookupStatus === 'found') {
+      return 'Rewards profile found'
+    }
+
+    if (rewardsLookupStatus === 'missing') {
+      return 'No rewards profile found'
+    }
+
+    if (rewardsLookupStatus === 'error') {
+      return 'Rewards check unavailable'
+    }
+
+    return 'Rewards profile'
+  }, [checkingRewardsProfile, form.customerId, hasValidCustomerId, rewardsLookupStatus])
 
   function updateItem(index: number, field: keyof OrderItemRow, value: string) {
-    setForm((current) => ({
-      ...current,
-      items: current.items.map((item, itemIndex) =>
-        itemIndex === index ? { ...item, [field]: value } : item,
+    setForm((current) =>
+      updateItemsAndTotal(
+        current,
+        current.items.map((item, itemIndex) =>
+          itemIndex === index ? { ...item, [field]: value } : item,
+        ),
+        menuItems,
       ),
-    }))
+    )
+  }
+
+  function addItem() {
+    setForm((current) =>
+      updateItemsAndTotal(current, [...current.items, { itemId: '', quantity: '1' }], menuItems),
+    )
+  }
+
+  function removeItem(index: number) {
+    setForm((current) =>
+      updateItemsAndTotal(
+        current,
+        current.items.filter((_, itemIndex) => itemIndex !== index),
+        menuItems,
+      ),
+    )
   }
 
   function updateStaff(index: number, field: keyof StaffRow, value: string) {
@@ -214,15 +392,28 @@ export default function OrderPage() {
     setStatus(idleStatus)
 
     try {
+      const resolvedCustomer = await resolveOrderCustomer(form)
+      const resolvedPointsEarned = calculatePointsEarned(
+        form.total,
+        resolvedCustomer.hasRewardsProfile,
+      )
+
+      setForm((current) => ({
+        ...current,
+        customerId: String(resolvedCustomer.customerId),
+        customerName: resolvedCustomer.customerName,
+        hasRewardsProfile: resolvedCustomer.hasRewardsProfile,
+      }))
+
       await createOrder({
-        customerId: Number(form.customerId),
-        customerName: form.customerName.trim(),
+        customerId: resolvedCustomer.customerId,
+        customerName: resolvedCustomer.customerName,
         orderId: Number(form.orderId),
         total: Number(form.total),
         time: form.orderedAt,
         method: form.method,
         payment: form.payment,
-        pointsEarned,
+        pointsEarned: resolvedPointsEarned,
         items: form.items.map((item) => ({
           itemId: Number(item.itemId),
           quantity: Number(item.quantity),
@@ -248,8 +439,8 @@ export default function OrderPage() {
         <span className="eyebrow">Order input</span>
         <h1>Record a restaurant order</h1>
         <p>
-          Creates the customer when needed, inserts the order, then writes item quantities and
-          serving employees in one transactional database request.
+          Starts with the ordered items, then records order details, customer lookup, and serving
+          employees in one transactional database request.
         </p>
       </div>
 
@@ -260,27 +451,74 @@ export default function OrderPage() {
       )}
 
       <form className="data-form" onSubmit={handleSubmit}>
-        <section className="form-section" aria-labelledby="customer-order-heading">
-          <h2 id="customer-order-heading">Customer and order</h2>
+        <section className="form-section" aria-labelledby="items-heading">
+          <div className="section-title-row">
+            <h2 id="items-heading">Ordered items</h2>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={addItem}
+            >
+              Add item
+            </button>
+          </div>
+
+          <div className="entry-list">
+            {form.items.map((item, index) => (
+              <div className="line-row" key={`item-${index}`}>
+                <label className="field">
+                  <span>Item ID</span>
+                  <select
+                    value={item.itemId}
+                    onChange={(event) => updateItem(index, 'itemId', event.target.value)}
+                    disabled={loadingMenuItems || menuItems.length === 0}
+                  >
+                    <option value="">
+                      {loadingMenuItems
+                        ? 'Loading items...'
+                        : menuItems.length === 0
+                          ? 'No menu items found'
+                          : 'Select an item'}
+                    </option>
+                    {menuItems.map((menuItem) => (
+                      <option key={menuItem.itemId} value={String(menuItem.itemId)}>
+                        {menuItem.itemId} - {menuItem.name}
+                        {typeof menuItem.price === 'number' && ` ($${menuItem.price.toFixed(2)})`}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Quantity</span>
+                  <input
+                    value={item.quantity}
+                    onChange={(event) => updateItem(index, 'quantity', event.target.value)}
+                    inputMode="numeric"
+                    placeholder="1"
+                  />
+                </label>
+                <button
+                  className="icon-button"
+                  type="button"
+                  aria-label={`Remove item ${index + 1}`}
+                  title="Remove item"
+                  disabled={form.items.length === 1}
+                  onClick={() => removeItem(index)}
+                >
+                  x
+                </button>
+              </div>
+            ))}
+          </div>
+          <div className="computed-field">
+            <span>Items total</span>
+            <strong>${calculatedItemsTotal.toFixed(2)}</strong>
+          </div>
+        </section>
+
+        <section className="form-section" aria-labelledby="order-details-heading">
+          <h2 id="order-details-heading">Order details</h2>
           <div className="form-grid">
-            <label className="field">
-              <span>Customer ID</span>
-              <input
-                value={form.customerId}
-                onChange={(event) => setForm({ ...form, customerId: event.target.value })}
-                inputMode="numeric"
-                maxLength={9}
-                placeholder="100000001"
-              />
-            </label>
-            <label className="field">
-              <span>Customer name</span>
-              <input
-                value={form.customerName}
-                onChange={(event) => setForm({ ...form, customerName: event.target.value })}
-                placeholder="Alice Johnson"
-              />
-            </label>
             <label className="field">
               <span>Order ID</span>
               <input
@@ -338,16 +576,6 @@ export default function OrderPage() {
                 placeholder="35.47"
               />
             </label>
-            <label className="check-field">
-              <input
-                checked={form.hasRewardsProfile}
-                onChange={(event) =>
-                  setForm({ ...form, hasRewardsProfile: event.target.checked })
-                }
-                type="checkbox"
-              />
-              <span>Customer has a rewards profile</span>
-            </label>
             <div className="computed-field">
               <span>Points earned</span>
               <strong>{pointsEarned}</strong>
@@ -355,79 +583,30 @@ export default function OrderPage() {
           </div>
         </section>
 
-        <section className="form-section" aria-labelledby="items-heading">
-          <div className="section-title-row">
-            <h2 id="items-heading">Ordered items</h2>
-            <button
-              className="secondary-button"
-              type="button"
-              onClick={() =>
-                setForm((current) => ({
-                  ...current,
-                  items: [...current.items, { itemId: '', quantity: '1' }],
-                }))
-              }
-            >
-              Add item
-            </button>
-          </div>
-
-          <div className="entry-list">
-            {form.items.map((item, index) => (
-              <div className="line-row" key={`item-${index}`}>
-                <label className="field">
-                  <span>Item ID</span>
-                  <select
-                    value={item.itemId}
-                    onChange={(event) => updateItem(index, 'itemId', event.target.value)}
-                    disabled={loadingMenuItems || menuItems.length === 0}
-                  >
-                    <option value="">
-                      {loadingMenuItems
-                        ? 'Loading items...'
-                        : menuItems.length === 0
-                          ? 'No menu items found'
-                          : 'Select an item'}
-                    </option>
-                    {menuItems.map((menuItem) => (
-                      <option key={menuItem.itemId} value={String(menuItem.itemId)}>
-                        {menuItem.itemId} - {menuItem.name}
-                        {typeof (menuItem as any).price === 'number' &&
-                          ` ($${(menuItem as any).price.toFixed(2)})`}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="field">
-                  <span>Quantity</span>
-                  <input
-                    value={item.quantity}
-                    onChange={(event) => updateItem(index, 'quantity', event.target.value)}
-                    inputMode="numeric"
-                    placeholder="1"
-                  />
-                </label>
-                <button
-                  className="icon-button"
-                  type="button"
-                  aria-label={`Remove item ${index + 1}`}
-                  title="Remove item"
-                  disabled={form.items.length === 1}
-                  onClick={() =>
-                    setForm((current) => ({
-                      ...current,
-                      items: current.items.filter((_, itemIndex) => itemIndex !== index),
-                    }))
-                  }
-                >
-                  x
-                </button>
-              </div>
-            ))}
-          </div>
-          <div className="computed-field">
-            <span>Items total</span>
-            <strong>${calculatedItemsTotal.toFixed(2)}</strong>
+        <section className="form-section" aria-labelledby="customer-info-heading">
+          <h2 id="customer-info-heading">Customer info</h2>
+          <div className="form-grid">
+            <label className="field">
+              <span>Customer ID</span>
+              <input
+                value={form.customerId}
+                onChange={(event) => setForm({ ...form, customerId: event.target.value })}
+                inputMode="numeric"
+                placeholder="53"
+              />
+            </label>
+            <label className="field">
+              <span>Customer name</span>
+              <input
+                value={form.customerName}
+                onChange={(event) => setForm({ ...form, customerName: event.target.value })}
+                placeholder="Alice Johnson"
+              />
+            </label>
+            <label className="check-field">
+              <input checked={hasRewardsProfileForCustomer} readOnly type="checkbox" />
+              <span>{rewardsLookupLabel}</span>
+            </label>
           </div>
         </section>
 

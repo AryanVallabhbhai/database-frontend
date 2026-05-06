@@ -17,6 +17,47 @@ export type ServerOption = {
   name: string
 }
 
+export type CustomerOption = {
+  customerId: number
+  name: string
+}
+
+function toFiniteNumber(value: unknown) {
+  const number = Number(value)
+  return Number.isFinite(number) ? number : null
+}
+
+function normalizeMenuItem(value: unknown): MenuItemOption | null {
+  if (typeof value !== 'object' || value === null) {
+    return null
+  }
+
+  const record = value as Record<string, unknown>
+  const itemId = toFiniteNumber(record.itemId ?? record.ItemID)
+  const name = record.name ?? record.Name
+  const price = toFiniteNumber(record.price ?? record.Price)
+
+  if (itemId === null || typeof name !== 'string') {
+    return null
+  }
+
+  return {
+    itemId,
+    name,
+    ...(price === null ? {} : { price }),
+  }
+}
+
+function normalizeMenuItems(data: unknown) {
+  if (!Array.isArray(data)) {
+    return null
+  }
+
+  return data
+    .map(normalizeMenuItem)
+    .filter((menuItem): menuItem is MenuItemOption => menuItem !== null)
+}
+
 function nullableText(value: string | null) {
   const trimmed = value?.trim()
   return trimmed ? trimmed : null
@@ -99,6 +140,100 @@ export function createOrder(input: CreateOrderInput) {
   return executeBatch(statements)
 }
 
+export async function findCustomerById(customerId: number) {
+  try {
+    const rows = await query<CustomerOption>(
+      `
+        SELECT CustomerID AS customerId, Name AS name
+        FROM Customer
+        WHERE CustomerID = ?
+        LIMIT 1
+      `,
+      [customerId],
+    )
+
+    return rows[0] ?? null
+  } catch {
+    const rows = await query<CustomerOption>(
+      `
+        SELECT customer_id AS customerId, name
+        FROM customer
+        WHERE customer_id = ?
+        LIMIT 1
+      `,
+      [customerId],
+    )
+
+    return rows[0] ?? null
+  }
+}
+
+export async function findCustomersByName(name: string) {
+  try {
+    return await query<CustomerOption>(
+      `
+        SELECT CustomerID AS customerId, Name AS name
+        FROM Customer
+        WHERE Name = ?
+        ORDER BY CustomerID
+      `,
+      [name],
+    )
+  } catch {
+    return query<CustomerOption>(
+      `
+        SELECT customer_id AS customerId, name
+        FROM customer
+        WHERE name = ?
+        ORDER BY customer_id
+      `,
+      [name],
+    )
+  }
+}
+
+export async function customerHasRewardsProfile(customerId: number) {
+  try {
+    const rows = await query<{ customerId: number }>(
+      `
+        SELECT CustomerID AS customerId
+        FROM Rewards
+        WHERE CustomerID = ?
+        LIMIT 1
+      `,
+      [customerId],
+    )
+
+    return rows.length > 0
+  } catch {
+    try {
+      const rows = await query<{ customerId: number }>(
+        `
+          SELECT customer_id AS customerId
+          FROM rewards_profile
+          WHERE customer_id = ?
+          LIMIT 1
+        `,
+        [customerId],
+      )
+
+      return rows.length > 0
+    } catch {
+      const rows = await query<{ customerId: number }>(
+        `
+          SELECT customer_id AS customerId
+          FROM rewards
+          WHERE customer_id = ?
+          LIMIT 1
+        `,
+        [customerId],
+      )
+
+      return rows.length > 0
+    }
+  }
+}
+
 export async function listMenuItems() {
   // First try a local public JSON file (served by the frontend) for fast reads.
   const localMenuUrl = '/menu_items.json'
@@ -106,9 +241,9 @@ export async function listMenuItems() {
     const resp = await fetch(localMenuUrl)
     if (resp.ok) {
       const data = await resp.json()
-      if (Array.isArray(data)) {
-        // ensure price is a number
-        return data.map((d: any) => ({ ...d, price: d.price != null ? Number(d.price) : undefined })) as MenuItemOption[]
+      const items = normalizeMenuItems(data)
+      if (items) {
+        return items
       }
     }
   } catch {
@@ -116,13 +251,14 @@ export async function listMenuItems() {
   }
 
   // Try backend-exported JSON (if configured)
-  const backendMenuUrl = (import.meta as any).env?.VITE_MENU_JSON_URL ?? 'http://localhost:3001/menu_items.json'
+  const backendMenuUrl = import.meta.env.VITE_MENU_JSON_URL ?? 'http://localhost:3001/menu_items.json'
   try {
     const resp2 = await fetch(backendMenuUrl)
     if (resp2.ok) {
       const data2 = await resp2.json()
-      if (Array.isArray(data2)) {
-        return data2.map((d: any) => ({ ...d, price: d.price != null ? Number(d.price) : undefined })) as MenuItemOption[]
+      const items = normalizeMenuItems(data2)
+      if (items) {
+        return items
       }
     }
   } catch {
