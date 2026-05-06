@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import {
   formatErrorList,
   isExactDigits,
@@ -7,7 +7,7 @@ import {
   isTwoLetterState,
   isValidPhone,
 } from '../lib/formValidation'
-import { createEmployee } from '../lib/restaurantRepository'
+import { createEmployee, listEmployees, getNextEmployeeId, type EmployeeSummary } from '../lib/restaurantRepository'
 import type {
   ChefSpecialization,
   CreateEmployeeInput,
@@ -231,6 +231,55 @@ export default function EmployeePage() {
   const [form, setForm] = useState(createInitialEmployeeForm)
   const [status, setStatus] = useState<PageStatus>(idleStatus)
   const [submitting, setSubmitting] = useState(false)
+  const [employees, setEmployees] = useState<EmployeeSummary[]>([])
+  const [filters, setFilters] = useState({ name: '', phone: '' })
+
+  useEffect(() => {
+    let active = true
+
+    void listEmployees()
+      .then((rows) => {
+        if (active) {
+          setEmployees(rows)
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setEmployees([])
+        }
+      })
+
+    return () => {
+      active = false
+    }
+  }, [])
+
+  // Autofill next available employee id on mount if field is empty
+  useEffect(() => {
+    let active = true
+
+    void getNextEmployeeId()
+      .then((id) => {
+        if (!active) return
+        setForm((prev) => (prev.employeeId ? prev : { ...prev, employeeId: String(id) }))
+      })
+      .catch(() => {
+        // ignore
+      })
+
+    return () => {
+      active = false
+    }
+  }, [])
+
+  const filteredEmployees = employees.filter((employee) => {
+    const nameMatch =
+      !filters.name || employee.name.toLowerCase().includes(filters.name.toLowerCase())
+    const phoneMatch =
+      !filters.phone || employee.phoneNumber.toLowerCase().includes(filters.phone.toLowerCase())
+
+    return nameMatch && phoneMatch
+  })
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -259,11 +308,7 @@ export default function EmployeePage() {
     <section className="page-panel">
       <div className="page-heading">
         <span className="eyebrow">Employee information</span>
-        <h1>Add an employee and one role</h1>
-        <p>
-          Inserts the employee supertype row and exactly one specialization row for manager, chef,
-          server, or cashier.
-        </p>
+        <h1>Employee Management</h1>
       </div>
 
       {status.tone !== 'idle' && (
@@ -291,7 +336,7 @@ export default function EmployeePage() {
               <input
                 value={form.name}
                 onChange={(event) => setForm({ ...form, name: event.target.value })}
-                placeholder="Emma Thompson"
+                placeholder="First Last"
               />
             </label>
             <label className="field">
@@ -307,7 +352,7 @@ export default function EmployeePage() {
               <input
                 value={form.phoneNumber}
                 onChange={(event) => setForm({ ...form, phoneNumber: event.target.value })}
-                placeholder="2145550201"
+                placeholder="111-222-3333"
               />
             </label>
             <label className="field">
@@ -324,7 +369,7 @@ export default function EmployeePage() {
               <input
                 value={form.street}
                 onChange={(event) => setForm({ ...form, street: event.target.value })}
-                placeholder="Oak Street"
+                placeholder="Street"
               />
             </label>
             <label className="field">
@@ -332,7 +377,7 @@ export default function EmployeePage() {
               <input
                 value={form.city}
                 onChange={(event) => setForm({ ...form, city: event.target.value })}
-                placeholder="Garland"
+                placeholder="City"
               />
             </label>
             <label className="field">
@@ -520,6 +565,63 @@ export default function EmployeePage() {
           </button>
         </div>
       </form>
+
+      <section className="form-section" aria-labelledby="employee-list-heading">
+        <div className="section-title-row">
+          <h2 id="employee-list-heading">All employees</h2>
+          <span className="section-count">{filteredEmployees.length} records</span>
+        </div>
+
+        <div className="filter-row">
+          <label className="field">
+            <span>Name</span>
+            <input
+              value={filters.name}
+              onChange={(event) => setFilters((prev) => ({ ...prev, name: event.target.value }))}
+              placeholder="Search by employee name"
+            />
+          </label>
+          <label className="field">
+            <span>Phone</span>
+            <input
+              value={filters.phone}
+              onChange={(event) => setFilters((prev) => ({ ...prev, phone: event.target.value }))}
+              placeholder="Search by phone"
+            />
+          </label>
+        </div>
+
+        {filteredEmployees.length > 0 ? (
+          <table className="orders-table">
+            <thead>
+              <tr>
+                <th>Employee ID</th>
+                <th>Name</th>
+                <th>Role</th>
+                <th>Phone</th>
+                <th>Wage</th>
+                <th>Hire date</th>
+                <th>Shift</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredEmployees.map((employee) => (
+                <tr key={employee.employeeId}>
+                  <td>{employee.employeeId}</td>
+                  <td>{employee.name}</td>
+                  <td>{employee.role}</td>
+                  <td>{employee.phoneNumber}</td>
+                  <td>{employee.wage ?? '—'}</td>
+                  <td>{employee.hireDate ?? '—'}</td>
+                  <td>{employee.shift}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className="empty-state">No employees were found.</p>
+        )}
+      </section>
     </section>
   )
 }

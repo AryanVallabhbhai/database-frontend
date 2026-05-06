@@ -3,6 +3,7 @@ import './App.css'
 import EmployeePage from './pages/EmployeePage'
 import MembershipPage from './pages/MembershipPage'
 import OrderPage from './pages/OrderPage'
+import OrderHistoryPage from './pages/OrderHistoryPage'
 
 function App() {
   return (
@@ -19,6 +20,12 @@ function App() {
               className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
             >
               Orders
+            </NavLink>
+            <NavLink
+              to="/order-history"
+              className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
+            >
+              Order History
             </NavLink>
             <NavLink
               to="/memberships"
@@ -38,6 +45,7 @@ function App() {
         <main className="app-main">
           <Routes>
             <Route path="/" element={<OrderPage />} />
+            <Route path="/order-history" element={<OrderHistoryPage />} />
             <Route path="/memberships" element={<MembershipPage />} />
             <Route path="/employees" element={<EmployeePage />} />
           </Routes>
