@@ -1,10 +1,21 @@
-import { executeBatch, type SqlStatement } from './db'
+import { executeBatch, query, type SqlStatement } from './db'
 import type {
   CreateEmployeeInput,
   CreateMembershipInput,
   CreateOrderInput,
   EmployeeRoleDetails,
 } from './restaurantTypes'
+
+export type MenuItemOption = {
+  itemId: number
+  name: string
+  price?: number
+}
+
+export type ServerOption = {
+  employeeId: number
+  name: string
+}
 
 function nullableText(value: string | null) {
   const trimmed = value?.trim()
@@ -86,6 +97,125 @@ export function createOrder(input: CreateOrderInput) {
   ]
 
   return executeBatch(statements)
+}
+
+export async function listMenuItems() {
+  // First try a local public JSON file (served by the frontend) for fast reads.
+  const localMenuUrl = '/menu_items.json'
+  try {
+    const resp = await fetch(localMenuUrl)
+    if (resp.ok) {
+      const data = await resp.json()
+      if (Array.isArray(data)) {
+        // ensure price is a number
+        return data.map((d: any) => ({ ...d, price: d.price != null ? Number(d.price) : undefined })) as MenuItemOption[]
+      }
+    }
+  } catch {
+    // ignore and fall back to backend JSON then DB
+  }
+
+  // Try backend-exported JSON (if configured)
+  const backendMenuUrl = (import.meta as any).env?.VITE_MENU_JSON_URL ?? 'http://localhost:3001/menu_items.json'
+  try {
+    const resp2 = await fetch(backendMenuUrl)
+    if (resp2.ok) {
+      const data2 = await resp2.json()
+      if (Array.isArray(data2)) {
+        return data2.map((d: any) => ({ ...d, price: d.price != null ? Number(d.price) : undefined })) as MenuItemOption[]
+      }
+    }
+  } catch {
+    // ignore and fall back to DB
+  }
+
+  // Fallback to querying the database via backend SQL endpoint
+  try {
+    return await query<MenuItemOption>(
+      `
+        SELECT ItemID AS itemId, Name AS name, Price AS price
+        FROM Items
+        ORDER BY ItemID
+      `,
+    )
+  } catch {
+    // Fallback to lowercase table name
+    try {
+      return await query<MenuItemOption>(
+        `
+          SELECT item_id AS itemId, name
+          FROM items
+          ORDER BY item_id
+        `,
+      )
+    } catch {
+      // Final fallback with singular form
+      return query<MenuItemOption>(
+        `
+          SELECT item_id AS itemId, name
+          FROM item
+          ORDER BY item_id
+        `,
+      )
+    }
+  }
+}
+
+export async function listServers() {
+  // First try a local public JSON file (served by the frontend) for fast reads.
+  const localServersUrl = '/servers.json'
+  try {
+    const resp = await fetch(localServersUrl)
+    if (resp.ok) {
+      const data = await resp.json()
+      if (Array.isArray(data)) {
+        return data as ServerOption[]
+      }
+    }
+  } catch {
+    // ignore and fall back to backend JSON then DB
+  }
+
+  // Try backend-exported JSON
+  const backendServersUrl = 'http://localhost:3001/servers.json'
+  try {
+    const resp2 = await fetch(backendServersUrl)
+    if (resp2.ok) {
+      const data2 = await resp2.json()
+      if (Array.isArray(data2)) {
+        return data2 as ServerOption[]
+      }
+    }
+  } catch {
+    // ignore and fall back to DB
+  }
+
+  // Fallback to querying the database for all servers
+  try {
+    return await query<ServerOption>(
+      `
+        SELECT e.employee_id AS employeeId, e.name
+        FROM employee e
+        WHERE e.employee_id IN (SELECT employee_id FROM server)
+        ORDER BY e.employee_id
+      `,
+    )
+  } catch {
+    // Fallback with uppercase table names
+    try {
+      return await query<ServerOption>(
+        `
+          SELECT e.EmployeeID AS employeeId, e.Name AS name
+          FROM Employee e
+          WHERE e.EmployeeID IN (SELECT EmployeeID FROM Server)
+          ORDER BY e.EmployeeID
+        `,
+      )
+    } catch {
+      // Return empty array if query fails
+      return []
+    }
+  }
 }
 
 export function createMembership(input: CreateMembershipInput) {

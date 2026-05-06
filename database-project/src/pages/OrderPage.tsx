@@ -1,5 +1,5 @@
-import { useMemo, useState, type FormEvent } from 'react'
-import { createOrder } from '../lib/restaurantRepository'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { createOrder, listMenuItems, listServers, type MenuItemOption, type ServerOption } from '../lib/restaurantRepository'
 import type { OrderMethod, PaymentMethod } from '../lib/restaurantTypes'
 import {
   formatErrorList,
@@ -113,6 +113,65 @@ export default function OrderPage() {
   const [form, setForm] = useState(createInitialOrderForm)
   const [status, setStatus] = useState<PageStatus>(idleStatus)
   const [submitting, setSubmitting] = useState(false)
+  const [menuItems, setMenuItems] = useState<MenuItemOption[]>([])
+  const [loadingMenuItems, setLoadingMenuItems] = useState(true)
+  const [servers, setServers] = useState<ServerOption[]>([])
+  const [loadingServers, setLoadingServers] = useState(true)
+
+  useEffect(() => {
+    async function loadMenuItems() {
+      try {
+        const items = await listMenuItems()
+        setMenuItems(items)
+      } catch (error) {
+        setStatus({
+          tone: 'error',
+          message: `Could not load menu items from database. ${getErrorMessage(error)}`,
+        })
+      } finally {
+        setLoadingMenuItems(false)
+      }
+    }
+
+    async function loadServers() {
+      try {
+        const serverList = await listServers()
+        setServers(serverList)
+      } catch (error) {
+        setStatus({
+          tone: 'error',
+          message: `Could not load servers from database. ${getErrorMessage(error)}`,
+        })
+      } finally {
+        setLoadingServers(false)
+      }
+    }
+
+    loadMenuItems()
+    loadServers()
+  }, [])
+
+  const calculatedItemsTotal = useMemo(() => {
+    return form.items.reduce((sum, item) => {
+      const qty = Number(item.quantity)
+      if (!Number.isFinite(qty) || qty <= 0) return sum
+
+      const menuItem = menuItems.find((m) => String(m.itemId) === item.itemId)
+      if (!menuItem || typeof (menuItem as any).price !== 'number') return sum
+
+      return sum + (menuItem as any).price * qty
+    }, 0)
+  }, [form.items, menuItems])
+
+  // Auto-update total when items change
+  useEffect(() => {
+    if (calculatedItemsTotal > 0) {
+      setForm((current) => ({
+        ...current,
+        total: calculatedItemsTotal.toFixed(2),
+      }))
+    }
+  }, [calculatedItemsTotal])
 
   const pointsEarned = useMemo(() => {
     const total = Number(form.total)
@@ -318,13 +377,26 @@ export default function OrderPage() {
               <div className="line-row" key={`item-${index}`}>
                 <label className="field">
                   <span>Item ID</span>
-                  <input
+                  <select
                     value={item.itemId}
                     onChange={(event) => updateItem(index, 'itemId', event.target.value)}
-                    inputMode="numeric"
-                    maxLength={4}
-                    placeholder="1006"
-                  />
+                    disabled={loadingMenuItems || menuItems.length === 0}
+                  >
+                    <option value="">
+                      {loadingMenuItems
+                        ? 'Loading items...'
+                        : menuItems.length === 0
+                          ? 'No menu items found'
+                          : 'Select an item'}
+                    </option>
+                    {menuItems.map((menuItem) => (
+                      <option key={menuItem.itemId} value={String(menuItem.itemId)}>
+                        {menuItem.itemId} - {menuItem.name}
+                        {typeof (menuItem as any).price === 'number' &&
+                          ` ($${(menuItem as any).price.toFixed(2)})`}
+                      </option>
+                    ))}
+                  </select>
                 </label>
                 <label className="field">
                   <span>Quantity</span>
@@ -353,6 +425,10 @@ export default function OrderPage() {
               </div>
             ))}
           </div>
+          <div className="computed-field">
+            <span>Items total</span>
+            <strong>${calculatedItemsTotal.toFixed(2)}</strong>
+          </div>
         </section>
 
         <section className="form-section" aria-labelledby="staff-heading">
@@ -376,14 +452,25 @@ export default function OrderPage() {
             {form.staff.map((staff, index) => (
               <div className="line-row staff-row" key={`staff-${index}`}>
                 <label className="field">
-                  <span>Employee ID</span>
-                  <input
+                  <span>Server</span>
+                  <select
                     value={staff.employeeId}
                     onChange={(event) => updateStaff(index, 'employeeId', event.target.value)}
-                    inputMode="numeric"
-                    maxLength={5}
-                    placeholder="10009"
-                  />
+                    disabled={loadingServers || servers.length === 0}
+                  >
+                    <option value="">
+                      {loadingServers
+                        ? 'Loading servers...'
+                        : servers.length === 0
+                          ? 'No servers found'
+                          : 'Select a server'}
+                    </option>
+                    {servers.map((server) => (
+                      <option key={server.employeeId} value={String(server.employeeId)}>
+                        {server.employeeId} - {server.name}
+                      </option>
+                    ))}
+                  </select>
                 </label>
                 <label className="field wide-field">
                   <span>Notes</span>

@@ -1,0 +1,122 @@
+[
+  {
+    "itemId": 1000,
+    "name": "Soda",
+    "type": "Drink",
+    "price": "2.99"
+  },
+  {
+    "itemId": 1001,
+    "name": "Juice",
+    "type": "Drink",
+    "price": "3.99"
+  },
+  {
+    "itemId": 1002,
+    "name": "Cocktail",
+    "type": "Drink",
+    "price": "9.99"
+  },
+  {
+    "itemId": 1003,
+    "name": "Wine",
+    "type": "Drink",
+    "price": "10.99"
+  },
+  {
+    "itemId": 1004,
+    "name": "Fries",
+    "type": "Side",
+    "price": "3.99"
+  },
+  {
+    "itemId": 1005,
+    "name": "Mashed Potatoes",
+    "type": "Side",
+    "price": "3.99"
+  },
+  {
+    "itemId": 1006,
+    "name": "Vegetables",
+    "type": "Side",
+    "price": "2.99"
+  },
+  {
+    "itemId": 1007,
+    "name": "Salad",
+    "type": "Side",
+    "price": "4.99"
+  },
+  {
+    "itemId": 1008,
+    "name": "Pasta",
+    "type": "Entre",
+    "price": "12.99"
+  },
+  {
+    "itemId": 1009,
+    "name": "Steak",
+    "type": "Entre",
+    "price": "15.99"
+  },
+  {
+    "itemId": 1010,
+    "name": "Lobster",
+    "type": "Entre",
+    "price": "22.99"
+  },
+  {
+    "itemId": 1011,
+    "name": "Burger",
+    "type": "Entre",
+    "price": "10.99"
+  },
+  {
+    "itemId": 1012,
+    "name": "Fried Pickles",
+    "type": "Appetizer",
+    "price": "5.99"
+  },
+  {
+    "itemId": 1013,
+    "name": "Onion Rings",
+    "type": "Appetizer",
+    "price": "7.99"
+  },
+  {
+    "itemId": 1014,
+    "name": "Mozzarella Sticks",
+    "type": "Appetizer",
+    "price": "6.99"
+  },
+  {
+    "itemId": 1015,
+    "name": "Soup",
+    "type": "Appetizer",
+    "price": "7.99"
+  },
+  {
+    "itemId": 1016,
+    "name": "Cake",
+    "type": "Dessert",
+    "price": "7.00"
+  },
+  {
+    "itemId": 1017,
+    "name": "Ice Cream",
+    "type": "Dessert",
+    "price": "5.00"
+  },
+  {
+    "itemId": 1018,
+    "name": "Crepe",
+    "type": "Dessert",
+    "price": "9.00"
+  },
+  {
+    "itemId": 1019,
+    "name": "Pie",
+    "type": "Dessert",
+    "price": "7.00"
+  }
+]
