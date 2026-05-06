@@ -78,6 +78,53 @@ function customerUpsert(customerId: number, customerName: string): SqlStatement 
   }
 }
 
+function projectCustomerUpsert(customerId: number, customerName: string): SqlStatement {
+  return {
+    sql: `
+      INSERT INTO Customer (CustomerID, Name)
+      VALUES (?, ?)
+      ON DUPLICATE KEY UPDATE Name = VALUES(Name)
+    `,
+    params: [customerId, customerName],
+  }
+}
+
+function toProjectOrderMethod(method: CreateOrderInput['method']) {
+  switch (method) {
+    case 'online':
+      return 'Online'
+    case 'delivery':
+      return 'Delivery'
+    case 'dine-in':
+      return 'Dine-In'
+  }
+}
+
+function toProjectPaymentMethod(payment: CreateOrderInput['payment']) {
+  switch (payment) {
+    case 'cash':
+      return 'Cash'
+    case 'card':
+      return 'Card'
+    case 'giftcard':
+      return 'Giftcard'
+  }
+}
+
+function getErrorText(error: unknown) {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function shouldTryLegacyOrderSchema(error: unknown) {
+  const message = getErrorText(error).toLowerCase()
+
+  return (
+    message.includes("doesn't exist") ||
+    message.includes('unknown column') ||
+    message.includes('unknown table')
+  )
+}
+
 function employeeRoleInsert(employeeId: number, roleDetails: EmployeeRoleDetails): SqlStatement {
   switch (roleDetails.role) {
     case 'Manager':
@@ -108,8 +155,45 @@ function employeeRoleInsert(employeeId: number, roleDetails: EmployeeRoleDetails
   }
 }
 
-export function createOrder(input: CreateOrderInput) {
+function createProjectOrderStatements(input: CreateOrderInput): SqlStatement[] {
   const statements: SqlStatement[] = [
+    projectCustomerUpsert(input.customerId, input.customerName),
+    {
+      sql: `
+        INSERT INTO Orders
+          (OrderID, Date_Time, Method, Payment, CustomerID)
+        VALUES (?, ?, ?, ?, ?)
+      `,
+      params: [
+        input.orderId,
+        toSqlDateTime(input.time),
+        toProjectOrderMethod(input.method),
+        toProjectPaymentMethod(input.payment),
+        input.customerId,
+      ],
+    },
+    ...input.items.map((item) => ({
+      sql: 'INSERT INTO Contain (OrderID, ItemID, Quantity) VALUES (?, ?, ?)',
+      params: [input.orderId, item.itemId, item.quantity],
+    })),
+    ...input.servedBy.map((staff) => ({
+      sql: 'INSERT INTO Serve (EmployeeID, OrderID, Notes) VALUES (?, ?, ?)',
+      params: [staff.employeeId, input.orderId, nullableText(staff.notes)],
+    })),
+  ]
+
+  if (input.pointsEarned > 0) {
+    statements.push({
+      sql: 'UPDATE Rewards SET Points = Points + ? WHERE CustomerID = ?',
+      params: [input.pointsEarned, input.customerId],
+    })
+  }
+
+  return statements
+}
+
+function createLegacyOrderStatements(input: CreateOrderInput): SqlStatement[] {
+  return [
     customerUpsert(input.customerId, input.customerName),
     {
       sql: `
@@ -136,8 +220,18 @@ export function createOrder(input: CreateOrderInput) {
       params: [staff.employeeId, input.orderId, nullableText(staff.notes)],
     })),
   ]
+}
 
-  return executeBatch(statements)
+export async function createOrder(input: CreateOrderInput) {
+  try {
+    return await executeBatch(createProjectOrderStatements(input))
+  } catch (error) {
+    if (!shouldTryLegacyOrderSchema(error)) {
+      throw error
+    }
+
+    return executeBatch(createLegacyOrderStatements(input))
+  }
 }
 
 export async function findCustomerById(customerId: number) {

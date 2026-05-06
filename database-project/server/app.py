@@ -20,9 +20,20 @@ load_dotenv()
 
 app = Flask(__name__)
 
-# Enable CORS for frontend origin
-CORS_ORIGIN = os.getenv('CORS_ORIGIN', 'http://localhost:5173')
-CORS(app, origins=[CORS_ORIGIN])
+# Enable CORS for local frontend origins
+def get_cors_origins():
+    configured = os.getenv('CORS_ORIGIN', 'http://localhost:5173')
+    origins = [origin.strip() for origin in configured.split(',') if origin.strip()]
+
+    for local_origin in ('http://localhost:5173', 'http://127.0.0.1:5173'):
+        if local_origin not in origins:
+            origins.append(local_origin)
+
+    return origins
+
+
+CORS_ORIGINS = get_cors_origins()
+CORS(app, origins=CORS_ORIGINS)
 
 # Expected API token from frontend
 API_TOKEN = os.getenv('API_TOKEN', 'replace-with-strong-token')
@@ -164,6 +175,11 @@ def verify_token():
     return token == API_TOKEN
 
 
+def to_mysql_placeholders(sql):
+    """Convert frontend-friendly ? placeholders to mysql-connector placeholders."""
+    return sql.replace('?', '%s')
+
+
 def export_menu_items_to_json(pool, out_path: Path):
     """Export menu items from the given pool to a JSON file at out_path."""
     if not pool:
@@ -296,58 +312,58 @@ def execute_sql():
     if not data:
         return jsonify({'error': 'Invalid request body'}), 400
 
+    conn = None
+    cursor = None
+
     try:
         try:
             conn = pool.get_connection()
         except MySQLError as e:
             # Handle pool exhaustion or other pool-level errors
             return jsonify({'error': f'Database error: Failed getting connection; {str(e)}'}), 503
+
         cursor = conn.cursor(dictionary=True)
 
         # Single statement
         if 'sql' in data and 'params' in data:
             sql = data['sql']
             params = data['params']
-            cursor.execute(sql, params)
-            
+            cursor.execute(to_mysql_placeholders(sql), params)
+
             # Check if it's a SELECT query
             if sql.strip().upper().startswith('SELECT'):
                 result = cursor.fetchall()
-                cursor.close()
-                conn.close()
                 return jsonify(result), 200
-            else:
-                conn.commit()
-                cursor.close()
-                conn.close()
-                return jsonify({'rows_affected': cursor.rowcount}), 200
+
+            conn.commit()
+            return jsonify({'rows_affected': cursor.rowcount}), 200
 
         # Batch transaction
-        elif 'statements' in data and data.get('transactional'):
+        if 'statements' in data and data.get('transactional'):
             statements = data['statements']
             try:
                 for stmt in statements:
                     sql = stmt['sql']
                     params = stmt.get('params', [])
-                    cursor.execute(sql, params)
-                
+                    cursor.execute(to_mysql_placeholders(sql), params)
+
                 conn.commit()
-                cursor.close()
-                conn.close()
                 return jsonify({'rows_affected': cursor.rowcount}), 200
             except MySQLError as e:
                 conn.rollback()
-                cursor.close()
-                conn.close()
                 return jsonify({'error': str(e)}), 400
 
-        else:
-            return jsonify({'error': 'Invalid request format'}), 400
+        return jsonify({'error': 'Invalid request format'}), 400
 
     except MySQLError as e:
         return jsonify({'error': f'Database error: {str(e)}'}), 500
     except Exception as e:
         return jsonify({'error': f'Internal error: {str(e)}'}), 500
+    finally:
+        if cursor is not None:
+            cursor.close()
+        if conn is not None:
+            conn.close()
 
 
 @app.errorhandler(404)

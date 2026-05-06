@@ -111,6 +111,10 @@ function calculatePointsEarned(totalValue: string, hasRewardsProfile: boolean) {
   return Math.floor(total)
 }
 
+function namesMatch(firstName: string, secondName: string) {
+  return firstName.trim().toLowerCase() === secondName.trim().toLowerCase()
+}
+
 async function resolveOrderCustomer(form: OrderFormState): Promise<ResolvedOrderCustomer> {
   const customerIdText = form.customerId.trim()
   const customerName = form.customerName.trim()
@@ -123,11 +127,17 @@ async function resolveOrderCustomer(form: OrderFormState): Promise<ResolvedOrder
       throw new Error('Customer name is required when the Customer ID is not already in the database.')
     }
 
+    if (customerName && existingCustomer && !namesMatch(customerName, existingCustomer.name)) {
+      throw new Error(
+        `Customer ID ${customerId} belongs to ${existingCustomer.name}. Clear the customer name or enter the matching customer.`,
+      )
+    }
+
     const hasRewardsProfile = await customerHasRewardsProfile(customerId)
 
     return {
       customerId,
-      customerName: customerName || existingCustomer?.name || '',
+      customerName: existingCustomer?.name || customerName,
       hasRewardsProfile,
     }
   }
@@ -166,12 +176,12 @@ function validateOrderForm(form: OrderFormState) {
     errors.push('Customer ID must be a positive whole number.')
   }
 
-  if (!isExactDigits(form.orderId, 9)) {
-    errors.push('Order ID must be exactly 9 digits.')
+  if (!isWholeNumberAtLeast(form.orderId, 1)) {
+    errors.push('Order ID must be a positive whole number.')
   }
 
-  if (!form.orderedAt || orderHour < 9 || orderHour > 22) {
-    errors.push('Order time must be during operating hours, 9 AM through 10 PM.')
+  if (!form.orderedAt || orderHour < 9 || orderHour >= 22) {
+    errors.push('Order time must be during operating hours, 9 AM until 10 PM.')
   }
 
   if (!isMoneyAtLeast(form.total, 0.01)) {
@@ -525,8 +535,7 @@ export default function OrderPage() {
                 value={form.orderId}
                 onChange={(event) => setForm({ ...form, orderId: event.target.value })}
                 inputMode="numeric"
-                maxLength={9}
-                placeholder="200000001"
+                placeholder="101"
               />
             </label>
             <label className="field">
