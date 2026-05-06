@@ -1,9 +1,13 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import {
   createOrder,
-  customerHasRewardsProfile,
-  findCustomerById,
+  ensureCustomerExists,
+  findCustomerProfileByEmail,
+  findCustomerProfileById,
+  findCustomerProfileByPhone,
   findCustomersByName,
+  getNextOrderId,
+  getNextCustomerId,
   listMenuItems,
   listServers,
   type MenuItemOption,
@@ -15,6 +19,8 @@ import {
   getHourFromDatetimeLocal,
   isExactDigits,
   isMoneyAtLeast,
+  isValidEmail,
+  isValidPhone,
   isWholeNumberAtLeast,
 } from '../lib/formValidation'
 import { getErrorMessage, idleStatus, type PageStatus } from './pageStatus'
@@ -32,6 +38,8 @@ type StaffRow = {
 type OrderFormState = {
   customerId: string
   customerName: string
+  customerEmail: string
+  customerPhone: string
   orderId: string
   orderedAt: string
   method: OrderMethod
@@ -45,26 +53,30 @@ type OrderFormState = {
 type ResolvedOrderCustomer = {
   customerId: number
   customerName: string
+  customerEmail: string
+  customerPhone: string
   hasRewardsProfile: boolean
 }
 
-type RewardsLookupStatus = 'idle' | 'found' | 'missing' | 'error'
+type RewardsLookupStatus = 'idle' | 'checking' | 'found' | 'missing' | 'error'
 
 const orderMethods: OrderMethod[] = ['dine-in', 'online', 'delivery']
 const paymentMethods: PaymentMethod[] = ['card', 'cash', 'giftcard']
 
 function getLocalDatetimeValue() {
   const date = new Date()
-  date.setMinutes(0, 0, 0)
+  date.setSeconds(0, 0)
   const timezoneOffset = date.getTimezoneOffset() * 60000
   return new Date(date.getTime() - timezoneOffset).toISOString().slice(0, 16)
 }
 
-function createInitialOrderForm(): OrderFormState {
+function createInitialOrderForm(orderId = ''): OrderFormState {
   return {
     customerId: '',
     customerName: '',
-    orderId: '',
+    customerEmail: '',
+    customerPhone: '',
+    orderId,
     orderedAt: getLocalDatetimeValue(),
     method: 'dine-in',
     payment: 'card',
@@ -108,58 +120,123 @@ function calculatePointsEarned(totalValue: string, hasRewardsProfile: boolean) {
     return 0
   }
 
-  return Math.floor(total)
-}
+  const wholeDollars = Math.floor(total)
+  const cents = total - wholeDollars
 
-function namesMatch(firstName: string, secondName: string) {
-  return firstName.trim().toLowerCase() === secondName.trim().toLowerCase()
+  return wholeDollars + (cents > 0.5 ? 1 : 0)
 }
 
 async function resolveOrderCustomer(form: OrderFormState): Promise<ResolvedOrderCustomer> {
   const customerIdText = form.customerId.trim()
   const customerName = form.customerName.trim()
+  const customerEmail = form.customerEmail.trim()
+  const customerPhone = form.customerPhone.trim()
 
+  // Try to find by customer ID first
   if (customerIdText) {
     const customerId = Number(customerIdText)
-    const existingCustomer = await findCustomerById(customerId)
+    const existingCustomer = await findCustomerProfileById(customerId)
 
-    if (!customerName && !existingCustomer) {
-      throw new Error('Customer name is required when the Customer ID is not already in the database.')
+    if (existingCustomer) {
+      return {
+        customerId,
+        customerName: existingCustomer.customerName,
+        customerEmail: existingCustomer.email || customerEmail,
+        customerPhone: existingCustomer.phoneNumber || customerPhone,
+        hasRewardsProfile: existingCustomer.hasRewardsProfile,
+      }
     }
 
-    if (customerName && existingCustomer && !namesMatch(customerName, existingCustomer.name)) {
-      throw new Error(
-        `Customer ID ${customerId} belongs to ${existingCustomer.name}. Clear the customer name or enter the matching customer.`,
-      )
-    }
-
-    const hasRewardsProfile = await customerHasRewardsProfile(customerId)
-
+    // ID not found - use as new ID with provided name
     return {
       customerId,
-      customerName: existingCustomer?.name || customerName,
-      hasRewardsProfile,
+      customerName: customerName || `Customer ${customerId}`,
+      customerEmail,
+      customerPhone,
+      hasRewardsProfile: false,
     }
   }
 
-  const matches = await findCustomersByName(customerName)
+  // Try to find by email
+  if (customerEmail) {
+    const existingCustomer = await findCustomerProfileByEmail(customerEmail)
 
-  if (matches.length === 0) {
-    throw new Error('No customer with that name was found. Enter a Customer ID to identify the customer.')
+    if (existingCustomer) {
+      return {
+        customerId: existingCustomer.customerId,
+        customerName: existingCustomer.customerName,
+        customerEmail: existingCustomer.email || customerEmail,
+        customerPhone: existingCustomer.phoneNumber || customerPhone,
+        hasRewardsProfile: existingCustomer.hasRewardsProfile,
+      }
+    }
+
+    // Email not found - generate new ID for this customer
+    const nextCustomerId = await getNextCustomerId()
+    return {
+      customerId: nextCustomerId,
+      customerName: customerName || `Customer ${nextCustomerId}`,
+      customerEmail,
+      customerPhone,
+      hasRewardsProfile: false,
+    }
   }
 
-  if (matches.length > 1) {
-    throw new Error('Multiple customers have that name. Enter the Customer ID to choose the right customer.')
+  // Try to find by phone
+  if (customerPhone) {
+    const existingCustomer = await findCustomerProfileByPhone(customerPhone)
+
+    if (existingCustomer) {
+      return {
+        customerId: existingCustomer.customerId,
+        customerName: existingCustomer.customerName,
+        customerEmail: existingCustomer.email || customerEmail,
+        customerPhone: existingCustomer.phoneNumber || customerPhone,
+        hasRewardsProfile: existingCustomer.hasRewardsProfile,
+      }
+    }
+
+    // Phone not found - generate new ID for this customer
+    const nextCustomerId = await getNextCustomerId()
+    return {
+      customerId: nextCustomerId,
+      customerName: customerName || `Customer ${nextCustomerId}`,
+      customerEmail,
+      customerPhone,
+      hasRewardsProfile: false,
+    }
   }
 
-  const customer = matches[0]
-  const hasRewardsProfile = await customerHasRewardsProfile(customer.customerId)
+  // Only name provided - try to find by name
+  if (customerName) {
+    const matches = await findCustomersByName(customerName)
 
-  return {
-    customerId: customer.customerId,
-    customerName: customer.name,
-    hasRewardsProfile,
+    if (matches.length === 1) {
+      const customer = matches[0]
+      const profile = await findCustomerProfileById(customer.customerId)
+
+      return {
+        customerId: customer.customerId,
+        customerName: profile?.customerName || customer.name,
+        customerEmail: profile?.email || '',
+        customerPhone: profile?.phoneNumber || '',
+        hasRewardsProfile: Boolean(profile?.hasRewardsProfile),
+      }
+    }
+
+    // Name not found or multiple matches - generate new ID for this customer
+    const nextCustomerId = await getNextCustomerId()
+    return {
+      customerId: nextCustomerId,
+      customerName,
+      customerEmail,
+      customerPhone,
+      hasRewardsProfile: false,
+    }
   }
+
+  // Should not reach here due to form validation
+  throw new Error('No customer identifier provided.')
 }
 
 function validateOrderForm(form: OrderFormState) {
@@ -167,13 +244,23 @@ function validateOrderForm(form: OrderFormState) {
   const orderHour = getHourFromDatetimeLocal(form.orderedAt)
   const hasCustomerId = Boolean(form.customerId.trim())
   const hasCustomerName = Boolean(form.customerName.trim())
+  const hasCustomerEmail = Boolean(form.customerEmail.trim())
+  const hasCustomerPhone = Boolean(form.customerPhone.trim())
 
-  if (!hasCustomerId && !hasCustomerName) {
-    errors.push('Enter either Customer ID or customer name.')
+  if (!hasCustomerId && !hasCustomerName && !hasCustomerEmail && !hasCustomerPhone) {
+    errors.push('Enter a customer ID, email, phone number, or customer name.')
   }
 
   if (hasCustomerId && !isWholeNumberAtLeast(form.customerId, 1)) {
     errors.push('Customer ID must be a positive whole number.')
+  }
+
+  if (hasCustomerEmail && !isValidEmail(form.customerEmail)) {
+    errors.push('Email must use the format user@domain.com.')
+  }
+
+  if (hasCustomerPhone && !isValidPhone(form.customerPhone)) {
+    errors.push('Phone number must use a valid phone format.')
   }
 
   if (!isWholeNumberAtLeast(form.orderId, 1)) {
@@ -227,6 +314,64 @@ export default function OrderPage() {
   const [rewardsLookupStatus, setRewardsLookupStatus] = useState<RewardsLookupStatus>('idle')
 
   useEffect(() => {
+    let didCancel = false
+
+    async function loadNextOrderId() {
+      try {
+        const nextOrderId = await getNextOrderId()
+
+        if (!didCancel) {
+          setForm((current) =>
+            current.orderId ? current : { ...current, orderId: String(nextOrderId) },
+          )
+        }
+      } catch (error) {
+        if (!didCancel) {
+          setStatus({
+            tone: 'error',
+            message: `Could not load the next order ID from the database. ${getErrorMessage(error)}`,
+          })
+        }
+      }
+    }
+
+    loadNextOrderId()
+
+    return () => {
+      didCancel = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let didCancel = false
+
+    async function loadNextCustomerId() {
+      try {
+        const nextCustomerId = await getNextCustomerId()
+
+        if (!didCancel) {
+          setForm((current) =>
+            current.customerId ? current : { ...current, customerId: String(nextCustomerId) },
+          )
+        }
+      } catch (error) {
+        if (!didCancel) {
+          setStatus({
+            tone: 'error',
+            message: `Could not load the next customer ID from the database. ${getErrorMessage(error)}`,
+          })
+        }
+      }
+    }
+
+    loadNextCustomerId()
+
+    return () => {
+      didCancel = true
+    }
+  }, [])
+
+  useEffect(() => {
     async function loadMenuItems() {
       try {
         const items = await listMenuItems()
@@ -259,82 +404,80 @@ export default function OrderPage() {
     loadServers()
   }, [])
 
-  useEffect(() => {
-    let didCancel = false
+  async function handleCheckCustomer() {
+    const customerIdText = form.customerId.trim()
+    const customerEmail = form.customerEmail.trim()
+    const customerPhone = form.customerPhone.trim()
 
-    async function checkRewardsProfile() {
-      const customerIdText = form.customerId.trim()
+    // If no search field is populated, show error
+    if (!customerIdText && !customerEmail && !customerPhone) {
+      setRewardsLookupStatus('missing')
+      return
+    }
 
-      if (!customerIdText || !isWholeNumberAtLeast(customerIdText, 1)) {
-        setCheckingRewardsProfile(false)
-        setRewardsLookupStatus('idle')
-        setForm((current) =>
-          current.hasRewardsProfile ? { ...current, hasRewardsProfile: false } : current,
-        )
+    setCheckingRewardsProfile(true)
+    setRewardsLookupStatus('checking')
+
+    try {
+      const lookupAttempts: Array<() => Promise<Awaited<ReturnType<typeof findCustomerProfileById>>>> = []
+
+      if (customerIdText && isWholeNumberAtLeast(customerIdText, 1)) {
+        lookupAttempts.push(() => findCustomerProfileById(Number(customerIdText)))
+      }
+
+      if (customerEmail && isValidEmail(customerEmail)) {
+        lookupAttempts.push(() => findCustomerProfileByEmail(customerEmail))
+      }
+
+      if (customerPhone && isValidPhone(customerPhone)) {
+        lookupAttempts.push(() => findCustomerProfileByPhone(customerPhone))
+      }
+
+      let lookup = null
+      for (const attempt of lookupAttempts) {
+        lookup = await attempt()
+        if (lookup) {
+          break
+        }
+      }
+
+      if (!lookup) {
+        // No record found - keep all fields unchanged
+        setRewardsLookupStatus('missing')
         return
       }
 
-      setCheckingRewardsProfile(true)
-      setRewardsLookupStatus('idle')
-
-      try {
-        const hasRewardsProfile = await customerHasRewardsProfile(Number(customerIdText))
-
-        if (didCancel) {
-          return
-        }
-
-        setForm((current) =>
-          current.hasRewardsProfile === hasRewardsProfile
-            ? current
-            : { ...current, hasRewardsProfile },
-        )
-        setRewardsLookupStatus(hasRewardsProfile ? 'found' : 'missing')
-      } catch {
-        if (didCancel) {
-          return
-        }
-
-        setForm((current) =>
-          current.hasRewardsProfile ? { ...current, hasRewardsProfile: false } : current,
-        )
-        setRewardsLookupStatus('error')
-      } finally {
-        if (!didCancel) {
-          setCheckingRewardsProfile(false)
-        }
-      }
+      // Record found - populate all fields with lookup result
+      setForm((current) => ({
+        ...current,
+        customerId: String(lookup.customerId),
+        customerName: lookup.customerName,
+        customerEmail: lookup.email || '',
+        customerPhone: lookup.phoneNumber || '',
+        hasRewardsProfile: lookup.hasRewardsProfile,
+      }))
+      setRewardsLookupStatus(lookup.hasRewardsProfile ? 'found' : 'missing')
+    } catch {
+      // Lookup error - keep all fields unchanged
+      setRewardsLookupStatus('error')
+    } finally {
+      setCheckingRewardsProfile(false)
     }
-
-    checkRewardsProfile()
-
-    return () => {
-      didCancel = true
-    }
-  }, [form.customerId])
+  }
 
   const calculatedItemsTotal = useMemo(() => {
     return calculateItemsTotal(form.items, menuItems)
   }, [form.items, menuItems])
 
-  const hasValidCustomerId = isWholeNumberAtLeast(form.customerId, 1)
-  const hasRewardsProfileForCustomer = hasValidCustomerId && form.hasRewardsProfile
+  const hasRewardsProfileForCustomer = form.hasRewardsProfile
 
   const pointsEarned = useMemo(() => {
     return calculatePointsEarned(form.total, hasRewardsProfileForCustomer)
   }, [form.total, hasRewardsProfileForCustomer])
 
   const rewardsLookupLabel = useMemo(() => {
-    if (!form.customerId.trim()) {
-      return 'Enter Customer ID to check rewards'
-    }
-
-    if (!hasValidCustomerId) {
-      return 'Enter a valid Customer ID to check rewards'
-    }
-
-    if (checkingRewardsProfile) {
-      return 'Checking rewards profile'
+    if (checkingRewardsProfile || rewardsLookupStatus === 'checking') {
+      return 'Checking rewards profile...'
     }
 
     if (rewardsLookupStatus === 'found') {
@@ -349,8 +492,8 @@ export default function OrderPage() {
       return 'Rewards check unavailable'
     }
 
-    return 'Rewards profile'
-  }, [checkingRewardsProfile, form.customerId, hasValidCustomerId, rewardsLookupStatus])
+    return 'Not checked'
+  }, [checkingRewardsProfile, rewardsLookupStatus])
 
   function updateItem(index: number, field: keyof OrderItemRow, value: string) {
     setForm((current) =>
@@ -408,12 +551,13 @@ export default function OrderPage() {
         resolvedCustomer.hasRewardsProfile,
       )
 
-      setForm((current) => ({
-        ...current,
-        customerId: String(resolvedCustomer.customerId),
-        customerName: resolvedCustomer.customerName,
-        hasRewardsProfile: resolvedCustomer.hasRewardsProfile,
-      }))
+      // Ensure the customer exists in the database (creates if not found)
+      await ensureCustomerExists(
+        resolvedCustomer.customerId,
+        resolvedCustomer.customerName,
+        resolvedCustomer.customerEmail || null,
+        resolvedCustomer.customerPhone || null,
+      )
 
       await createOrder({
         customerId: resolvedCustomer.customerId,
@@ -434,7 +578,8 @@ export default function OrderPage() {
         })),
       })
 
-      setForm(createInitialOrderForm())
+      setForm(createInitialOrderForm(String(Number(form.orderId) + 1)))
+
       setStatus({ tone: 'success', message: 'Order was submitted to the database endpoint.' })
     } catch (error) {
       setStatus({ tone: 'error', message: getErrorMessage(error) })
@@ -447,11 +592,8 @@ export default function OrderPage() {
     <section className="page-panel">
       <div className="page-heading">
         <span className="eyebrow">Order input</span>
-        <h1>Record a restaurant order</h1>
-        <p>
-          Starts with the ordered items, then records order details, customer lookup, and serving
-          employees in one transactional database request.
-        </p>
+        <h1>Take Orders
+        </h1>
       </div>
 
       {status.tone !== 'idle' && (
@@ -585,15 +727,21 @@ export default function OrderPage() {
                 placeholder="35.47"
               />
             </label>
-            <div className="computed-field">
-              <span>Points earned</span>
-              <strong>{pointsEarned}</strong>
-            </div>
           </div>
         </section>
 
         <section className="form-section" aria-labelledby="customer-info-heading">
-          <h2 id="customer-info-heading">Customer info</h2>
+          <div className="section-title-row">
+            <h2 id="customer-info-heading">Customer info</h2>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={handleCheckCustomer}
+              disabled={checkingRewardsProfile}
+            >
+              {checkingRewardsProfile ? 'Checking...' : 'Check customer'}
+            </button>
+          </div>
           <div className="form-grid">
             <label className="field">
               <span>Customer ID</span>
@@ -605,6 +753,24 @@ export default function OrderPage() {
               />
             </label>
             <label className="field">
+              <span>Email</span>
+              <input
+                value={form.customerEmail}
+                onChange={(event) => setForm({ ...form, customerEmail: event.target.value })}
+                placeholder="alice.j@email.com"
+                type="email"
+              />
+            </label>
+            <label className="field">
+              <span>Phone</span>
+              <input
+                value={form.customerPhone}
+                onChange={(event) => setForm({ ...form, customerPhone: event.target.value })}
+                inputMode="tel"
+                placeholder="214-555-0101"
+              />
+            </label>
+            <label className="field">
               <span>Customer name</span>
               <input
                 value={form.customerName}
@@ -612,10 +778,14 @@ export default function OrderPage() {
                 placeholder="Alice Johnson"
               />
             </label>
-            <label className="check-field">
-              <input checked={hasRewardsProfileForCustomer} readOnly type="checkbox" />
-              <span>{rewardsLookupLabel}</span>
-            </label>
+            <div className="computed-field">
+              <span>Rewards profile</span>
+              <strong>{rewardsLookupLabel}</strong>
+            </div>
+            <div className="computed-field">
+              <span>Points earned</span>
+              <strong>{pointsEarned}</strong>
+            </div>
           </div>
         </section>
 
